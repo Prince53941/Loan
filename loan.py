@@ -48,11 +48,9 @@ def preprocess_data(df, target_col):
     categorical_cols = X.select_dtypes(include=["object", "category"]).columns.tolist()
 
     # Handle missing values
-    # Numeric: fill with median
     for col in numeric_cols:
         X[col] = X[col].fillna(X[col].median())
 
-    # Categorical: fill with mode
     for col in categorical_cols:
         if X[col].isnull().sum() > 0:
             X[col] = X[col].fillna(X[col].mode()[0])
@@ -65,12 +63,11 @@ def preprocess_data(df, target_col):
         X_encoded, y, test_size=0.2, random_state=42, stratify=y
     )
 
-    # Scale numeric features (helpful for Logistic Regression)
+    # Scale numeric features (mainly for Logistic Regression)
     scaler = StandardScaler()
     X_train_scaled = X_train.copy()
     X_test_scaled = X_test.copy()
 
-    # Numeric columns keep the same names after encoding
     numeric_encoded_cols = [col for col in numeric_cols if col in X_train.columns]
 
     if numeric_encoded_cols:
@@ -117,10 +114,6 @@ def evaluate_model(model, X_test, y_test):
 
 
 def prepare_single_input(meta, input_dict):
-    """
-    Convert user input dict to a single-row DataFrame with the same
-    columns as training data (after get_dummies).
-    """
     df_single = pd.DataFrame([input_dict])
 
     # Handle missing like before
@@ -129,9 +122,8 @@ def prepare_single_input(meta, input_dict):
             df_single[col] = df_single[col].fillna(df_single[col].median())
 
     for col in meta["categorical_cols"]:
-        if col in df_single.columns:
-            if df_single[col].isnull().sum() > 0:
-                df_single[col] = df_single[col].fillna(df_single[col].mode()[0])
+        if col in df_single.columns and df_single[col].isnull().sum() > 0:
+            df_single[col] = df_single[col].fillna(df_single[col].mode()[0])
 
     # One-hot encode
     df_single_encoded = pd.get_dummies(
@@ -157,17 +149,15 @@ def prepare_single_input(meta, input_dict):
 
 def pretty_loan_output(raw_pred):
     """
-    Map raw model output to a user-friendly message.
-    Adjust mapping based on your dataset labels.
+    Map raw model label to a friendly message.
+    Adjust based on your dataset labels.
     """
-    # Common cases: 'Y'/'N', 1/0, 'Approved'/'Rejected'
-    if str(raw_pred) in ["Y", "1", "Approved", "Yes"]:
+    s = str(raw_pred)
+    if s in ["Y", "1", "Approved", "Yes"]:
         return "Loan Approved"
-    elif str(raw_pred) in ["N", "0", "Rejected", "No"]:
+    if s in ["N", "0", "Rejected", "No"]:
         return "Loan Not Approved"
-    else:
-        # Fallback – just show original value
-        return str(raw_pred)
+    return s  # fallback
 
 
 def prediction_form(df, meta, model):
@@ -177,7 +167,7 @@ def prediction_form(df, meta, model):
         user_input = {}
 
         for col in meta["original_columns"]:
-            # Do NOT ask for target column (Loan_Status)
+            # Do NOT ask for the target column
             if col == meta["target_col"]:
                 continue
 
@@ -216,16 +206,34 @@ def prediction_form(df, meta, model):
         try:
             X_single = prepare_single_input(meta, user_input)
             prediction = model.predict(X_single)[0]
-
             nice_text = pretty_loan_output(prediction)
 
+            # Default messages
+            approval_message = ""
+            if "Approved" in nice_text:
+                approval_message = "Yes, the loan will be approved."
+                st.success(approval_message)
+            elif "Not Approved" in nice_text:
+                approval_message = "No, the loan will not be approved."
+                st.error(approval_message)
+            else:
+                # Fallback if labels are unusual
+                st.info(f"Prediction: {nice_text}")
+
+            # Optional single confidence line (no JSON / dict)
             if hasattr(model, "predict_proba"):
                 proba = model.predict_proba(X_single)[0]
-                st.success(f"Prediction: {nice_text}  (raw label: {prediction})")
-                st.write("Prediction Probabilities:")
-                st.write({str(cls): float(p) for cls, p in zip(model.classes_, proba)})
-            else:
-                st.success(f"Prediction: {nice_text}  (raw label: {prediction})")
+                classes = list(model.classes_)
+
+                # Try to find probability for positive class "Y"
+                if "Y" in classes:
+                    idx = classes.index("Y")
+                    approval_prob = proba[idx]
+                else:
+                    # If we don't know which class is positive, just use max
+                    approval_prob = max(proba)
+
+                st.write(f"Model confidence: {approval_prob * 100:.2f}%")
 
         except Exception as e:
             st.error(f"Error in prediction: {e}")
@@ -240,12 +248,12 @@ def main():
         """
         This app builds a **Loan Approval Prediction Model** using your dataset.
 
-        **Steps:**
+        **Flow:**
         1. Upload your loan dataset (CSV).
-        2. App will use `Loan_Status` as the target (if present).
-        3. Choose ML algorithm and train the model.
-        4. View evaluation metrics.
-        5. Predict loan approval for a new applicant.
+        2. The app uses `Loan_Status` as the target (if present).
+        3. Clean & preprocess data.
+        4. Train Logistic Regression / Random Forest.
+        5. Predict if a new applicant's loan will be approved.
         """
     )
 
@@ -256,12 +264,13 @@ def main():
     if uploaded_file is not None:
         df = pd.read_csv(uploaded_file)
 
-        # Force/Prefer Loan_Status as target if present
+        # Prefer Loan_Status as target if present
         if "Loan_Status" in df.columns:
             target_col = "Loan_Status"
+            st.sidebar.success("Using `Loan_Status` as target column.")
+            st.sidebar.text(f"Target column: {target_col}")
         else:
-            # Fallback: let user choose
-            st.sidebar.warning("Column `Loan_Status` not found. Please select the target column manually.")
+            st.sidebar.warning("`Loan_Status` not found. Please select the target column.")
             target_col = st.sidebar.selectbox("Select Target Column", options=df.columns)
 
         algorithm = st.sidebar.selectbox("Select Algorithm", ["Logistic Regression", "Random Forest"])
@@ -269,7 +278,7 @@ def main():
         st.sidebar.markdown("---")
         train_button = st.sidebar.button("Run Full Pipeline (Clean + Train + Evaluate)")
 
-        # Show EDA
+        # EDA
         st.header("1. Exploratory Data Analysis")
         basic_eda(df, target_col)
 
@@ -278,7 +287,6 @@ def main():
                 X_train, X_test, y_train, y_test, meta = preprocess_data(df.copy(), target_col)
                 model = train_model(algorithm, X_train, y_train)
 
-                # Store in session_state for later prediction
                 st.session_state["df"] = df
                 st.session_state["meta"] = meta
                 st.session_state["model"] = model
@@ -288,7 +296,7 @@ def main():
             st.header("2. Model Performance")
             evaluate_model(model, X_test, y_test)
 
-        # If model is already trained, show prediction UI
+        # Prediction section
         if "model" in st.session_state and "meta" in st.session_state and "df" in st.session_state:
             st.header("3. Loan Approval Prediction")
             prediction_form(st.session_state["df"], st.session_state["meta"], st.session_state["model"])
