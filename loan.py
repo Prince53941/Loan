@@ -30,9 +30,10 @@ def basic_eda(df, target_col):
     st.write(df.isnull().sum())
 
     if target_col in df.columns:
-        st.subheader("Target Variable Distribution")
+        st.subheader(f"Target Variable Distribution: {target_col}")
         st.write(df[target_col].value_counts())
         st.bar_chart(df[target_col].value_counts())
+
 
 def preprocess_data(df, target_col):
     # Drop rows where target is missing
@@ -53,7 +54,8 @@ def preprocess_data(df, target_col):
 
     # Categorical: fill with mode
     for col in categorical_cols:
-        X[col] = X[col].fillna(X[col].mode()[0])
+        if X[col].isnull().sum() > 0:
+            X[col] = X[col].fillna(X[col].mode()[0])
 
     # One-hot encode categorical variables
     X_encoded = pd.get_dummies(X, columns=categorical_cols, drop_first=True)
@@ -68,8 +70,9 @@ def preprocess_data(df, target_col):
     X_train_scaled = X_train.copy()
     X_test_scaled = X_test.copy()
 
-    # Only scale numeric columns that are in the encoded data
-    numeric_encoded_cols = [col for col in X_train.columns if any(col.startswith(nc) for nc in numeric_cols)]
+    # Numeric columns keep the same names after encoding
+    numeric_encoded_cols = [col for col in numeric_cols if col in X_train.columns]
+
     if numeric_encoded_cols:
         X_train_scaled[numeric_encoded_cols] = scaler.fit_transform(X_train[numeric_encoded_cols])
         X_test_scaled[numeric_encoded_cols] = scaler.transform(X_test[numeric_encoded_cols])
@@ -80,7 +83,8 @@ def preprocess_data(df, target_col):
         "categorical_cols": categorical_cols,
         "feature_columns": X_encoded.columns.tolist(),
         "scaler": scaler,
-        "numeric_encoded_cols": numeric_encoded_cols
+        "numeric_encoded_cols": numeric_encoded_cols,
+        "target_col": target_col,
     }
 
     return X_train_scaled, X_test_scaled, y_train, y_test, meta
@@ -117,7 +121,6 @@ def prepare_single_input(meta, input_dict):
     Convert user input dict to a single-row DataFrame with the same
     columns as training data (after get_dummies).
     """
-    # Create DataFrame from single row
     df_single = pd.DataFrame([input_dict])
 
     # Handle missing like before
@@ -127,13 +130,21 @@ def prepare_single_input(meta, input_dict):
 
     for col in meta["categorical_cols"]:
         if col in df_single.columns:
-            df_single[col] = df_single[col].fillna(df_single[col].mode()[0])
+            if df_single[col].isnull().sum() > 0:
+                df_single[col] = df_single[col].fillna(df_single[col].mode()[0])
 
     # One-hot encode
-    df_single_encoded = pd.get_dummies(df_single, columns=meta["categorical_cols"], drop_first=True)
+    df_single_encoded = pd.get_dummies(
+        df_single,
+        columns=meta["categorical_cols"],
+        drop_first=True
+    )
 
     # Align with training columns
-    df_single_encoded = df_single_encoded.reindex(columns=meta["feature_columns"], fill_value=0)
+    df_single_encoded = df_single_encoded.reindex(
+        columns=meta["feature_columns"],
+        fill_value=0
+    )
 
     # Scale numeric columns
     if meta["numeric_encoded_cols"]:
@@ -144,36 +155,59 @@ def prepare_single_input(meta, input_dict):
     return df_single_encoded
 
 
+def pretty_loan_output(raw_pred):
+    """
+    Map raw model output to a user-friendly message.
+    Adjust mapping based on your dataset labels.
+    """
+    # Common cases: 'Y'/'N', 1/0, 'Approved'/'Rejected'
+    if str(raw_pred) in ["Y", "1", "Approved", "Yes"]:
+        return "Loan Approved"
+    elif str(raw_pred) in ["N", "0", "Rejected", "No"]:
+        return "Loan Not Approved"
+    else:
+        # Fallback – just show original value
+        return str(raw_pred)
+
+
 def prediction_form(df, meta, model):
     st.subheader("Predict Loan Approval for a New Applicant")
 
     with st.form("prediction_form"):
         user_input = {}
+
         for col in meta["original_columns"]:
-            if col not in df.columns:
+            # Do NOT ask for target column (Loan_Status)
+            if col == meta["target_col"]:
                 continue
 
             if col in meta["numeric_cols"]:
-                # Use min and max from data as reference
                 col_min = float(df[col].min())
                 col_max = float(df[col].max())
                 default_val = float(df[col].median())
+
+                if col_min == col_max:
+                    col_min = col_min * 0.5
+                    col_max = col_max * 1.5
+
                 user_input[col] = st.number_input(
                     f"{col} (numeric)",
                     min_value=col_min,
                     max_value=col_max,
                     value=default_val
                 )
+
             elif col in meta["categorical_cols"]:
                 options = df[col].dropna().unique().tolist()
-                default_opt = options[0] if options else ""
+                if len(options) == 0:
+                    options = ["N/A"]
                 user_input[col] = st.selectbox(
                     f"{col} (category)",
                     options=options,
-                    index=0 if options else None
+                    index=0
                 )
+
             else:
-                # If some column type is unknown, treat as text
                 user_input[col] = st.text_input(f"{col} (text)")
 
         submitted = st.form_submit_button("Predict Loan Approval")
@@ -183,13 +217,15 @@ def prediction_form(df, meta, model):
             X_single = prepare_single_input(meta, user_input)
             prediction = model.predict(X_single)[0]
 
+            nice_text = pretty_loan_output(prediction)
+
             if hasattr(model, "predict_proba"):
                 proba = model.predict_proba(X_single)[0]
-                st.success(f"Prediction: {prediction}")
+                st.success(f"Prediction: {nice_text}  (raw label: {prediction})")
                 st.write("Prediction Probabilities:")
-                st.write({f"class_{i}": float(p) for i, p in enumerate(proba)})
+                st.write({str(cls): float(p) for cls, p in zip(model.classes_, proba)})
             else:
-                st.success(f"Prediction: {prediction}")
+                st.success(f"Prediction: {nice_text}  (raw label: {prediction})")
 
         except Exception as e:
             st.error(f"Error in prediction: {e}")
@@ -206,7 +242,7 @@ def main():
 
         **Steps:**
         1. Upload your loan dataset (CSV).
-        2. Select the target column (e.g. `Loan_Status`).
+        2. App will use `Loan_Status` as the target (if present).
         3. Choose ML algorithm and train the model.
         4. View evaluation metrics.
         5. Predict loan approval for a new applicant.
@@ -220,9 +256,13 @@ def main():
     if uploaded_file is not None:
         df = pd.read_csv(uploaded_file)
 
-        # Guess target column
-        default_target = "Loan_Status" if "Loan_Status" in df.columns else df.columns[-1]
-        target_col = st.sidebar.selectbox("Select Target Column", options=df.columns, index=list(df.columns).index(default_target))
+        # Force/Prefer Loan_Status as target if present
+        if "Loan_Status" in df.columns:
+            target_col = "Loan_Status"
+        else:
+            # Fallback: let user choose
+            st.sidebar.warning("Column `Loan_Status` not found. Please select the target column manually.")
+            target_col = st.sidebar.selectbox("Select Target Column", options=df.columns)
 
         algorithm = st.sidebar.selectbox("Select Algorithm", ["Logistic Regression", "Random Forest"])
 
